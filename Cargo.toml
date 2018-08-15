@@ -1,0 +1,18 @@
+[package]
+name = "petty"
+version = "0.1.0"
+authors = ["Johan Mickos <johan.mickos@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/jarlopez/petty"
+description = """
+Netty-like selector-driven event loop in Rust.
+"""
+categories = ["asynchronous"]
+
+[dependencies]
+bytes = "0.4"
+futures = "0.1.23"
+udt = "0.2.0"
+
+[dev-dependencies]
+env_logger = { version = "0.4", default-features = false }
