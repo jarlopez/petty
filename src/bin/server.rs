@@ -1,23 +1,21 @@
-extern crate petty;
 extern crate futures;
+extern crate petty;
 extern crate udt;
 
-use petty::*;
-use petty::transport::udt::UdtSelector;
-use petty::ev_loop::SelectorEventLoop;
-use udt::UdtSocket;
-use petty::transport::udt::UdtChannel;
-use petty::transport::udt::ChannelKind;
-use petty::transport::udt::UdtKey;
-use petty::ops::Ops;
-use petty::ev_loop::Trigger;
-
 fn server() {
-
     use std;
     use std::net::{SocketAddr, SocketAddrV4};
     use std::str::FromStr;
     use udt::*;
+
+    use petty::ev_loop::SelectorEventLoop;
+    use petty::ev_loop::Trigger;
+    use petty::ops::Ops;
+    use petty::transport::udt::ChannelKind;
+    use petty::transport::udt::UdtChannel;
+    use petty::transport::udt::UdtKey;
+    use petty::transport::udt::UdtSelector;
+    use udt::UdtSocket;
 
     use futures;
     use futures::Future;
@@ -33,7 +31,6 @@ fn server() {
         tx.send(events)
             .expect("Unable to return events receiver to listener.");
         println!("spawning event loop.run");
-        use transport::udt::*;
 
         let localhost = std::net::Ipv4Addr::from_str("127.0.0.1").unwrap();
 
@@ -60,14 +57,13 @@ fn server() {
             match ev {
                 Trigger::Read(_) => {
                     println!("received READ event");
-                },
+                }
                 Trigger::Write(_) => {
                     println!("received WRITE event");
-                },
+                }
                 Trigger::Error(_) => {
                     println!("received ERROR event");
-
-                },
+                }
             }
             Ok(())
         }).wait()

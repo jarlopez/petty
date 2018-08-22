@@ -94,7 +94,7 @@ impl Selector<UdtKey> for UdtSelector {
             .unwrap();
 
         self.poller
-            .add_usock(&key.socket_clone(), Some(events))
+            .add_usock(key.socket_ref(), Some(events))
             .expect("add_usock err");
         self.registered.insert(key.socket_clone(), key);
     }
@@ -157,6 +157,10 @@ impl UdtKey {
             readiness,
             interest,
         }
+    }
+
+    pub fn socket_ref(&self) -> &UdtSocket {
+        &self.ch.io.socket
     }
 
     pub fn socket_clone(&self) -> UdtSocket {
