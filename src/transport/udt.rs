@@ -127,12 +127,13 @@ impl Selector<UdtKey> for UdtSelector {
         F: Fn(&mut Vec<RWEvent<UdtKey>>, &mut UdtKey) -> (),
     {
         let mut selected = mem::replace(&mut self.selected, HashSet::new());
-        selected.drain().for_each(|r| {
-            if let Some(key) = self.registered.get_mut(&r) {
-                f(coll, key);
-            } else {
-                println!("not found!");
-            }
+        selected.drain().for_each(|s| {
+            self.registered.get_mut(&s).map_or_else(
+                || {
+                    println!("Key not found!");
+                },
+                |key| f(coll, key),
+            );
         });
     }
 }
