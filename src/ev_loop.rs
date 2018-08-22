@@ -1,12 +1,21 @@
+use channel::RWEvent;
+use channel::ReadEvent;
 use futures::sync::mpsc;
+use ops::Ops;
 use selector::Selector;
 use selector::SelectorKey;
 use std::marker::PhantomData;
 
-pub struct SelectorEventLoop<S, K> {
+pub struct SelectorEventLoop<S, K>
+where
+    S: Selector<K>,
+    K: SelectorKey,
+{
     selector: S,
+    // Outgoing events from this event loop
     events: mpsc::UnboundedSender<Trigger>,
     key: PhantomData<K>,
+    read_buf: Vec<RWEvent<K>>,
 }
 
 impl<S, K> SelectorEventLoop<S, K>
@@ -21,8 +30,13 @@ where
             selector,
             events: tx,
             key: PhantomData,
+            read_buf: Vec::new(),
         };
         (event_loop, rx)
+    }
+
+    pub fn register(&mut self, key: K, ops: Ops) {
+        self.selector.register(key, ops);
     }
 
     pub fn run(&mut self) {
@@ -34,23 +48,35 @@ where
     }
 
     fn process_selected(&mut self) {
-        use channel::{Read, Write};
-        self.selector.on_selected(|key| {
-            let ready_ops = key.ready_ops();
-            if ready_ops.has_read() || ready_ops.has_accept() {
-                println!("key has read or accept");
-                // get unsafe access, perform read()
-                // unsafe.read() delegates down into doReadMEssages, which in ACCEPTOR's case
-                // calls UDT's accept
-                // doReadMessages then adds new channels to the pipeline :p
-                // triggering pipeline.fireChannelRead with each new channel
-                let io = key.io();
-                io.read();
-                // what events are possible from a 'read'?
-                // either a series of byte buffers that need forwarding to ... something
-                // or a newly connected peer who needs to be registered
+        use channel::Read;
+
+        self.selector
+            .on_selected(&mut self.read_buf, |ev, key: &mut K| {
+                let ready_ops = key.ready_ops();
+                if ready_ops.has_read() || ready_ops.has_accept() {
+                    let io = key.io();
+                    io.read(ev);
+                }
+            });
+        for ev in self.read_buf.drain(..) {
+            match ev {
+                RWEvent::Read(ReadEvent::NewPeer(key, _addr)) => {
+                    let mut ops = Ops::empty();
+                    ops.apply(Ops::READ);
+                    ops.apply(Ops::WRITE);
+                    ops.apply(Ops::ERROR);
+                    self.selector.register(key, ops);
+                }
+                RWEvent::Read(ReadEvent::Data(bytes)) => {
+                    self.events
+                        .unbounded_send(Trigger::Read(events::ReadEvent::Data(bytes)))
+                        .expect("Dropped unbounded events receiver");
+                }
+                other => {
+                    println!("Unhandled event {:?}", other);
+                }
             }
-        });
+        }
     }
 
     fn run_io_tasks(&mut self) {}
@@ -63,56 +89,14 @@ pub enum Trigger {
     Error(events::ErrorEvent),
 }
 mod events {
+    use bytes::Bytes;
+
     #[derive(Debug)]
-    pub struct ReadEvent;
+    pub enum ReadEvent {
+        Data(Bytes),
+    }
     #[derive(Debug)]
     pub struct WriteEvent;
     #[derive(Debug)]
     pub struct ErrorEvent;
-}
-
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn socket_setup() {
-        use Ops;
-
-        use std;
-        use std::net::{SocketAddr, SocketAddrV4};
-        use std::str::FromStr;
-        use udt::*;
-
-        use super::*;
-        use futures::Future;
-        use futures::Stream;
-        use std::thread;
-        use transport::udt::*;
-
-        let localhost = std::net::Ipv4Addr::from_str("127.0.0.1").unwrap();
-
-        let sock = UdtSocket::new(SocketFamily::AFInet, SocketType::Stream).unwrap();
-        sock.bind(SocketAddr::V4(SocketAddrV4::new(localhost, 8080)))
-            .unwrap();
-        let my_addr = sock.getsockname().unwrap();
-        println!("Server bound to {:?}", my_addr);
-        sock.listen(5).unwrap();
-
-        let ch = UdtChannel::new(sock, ChannelKind::Acceptor);
-        let key = UdtSelectorKey::new(ch);
-        let mut selector = UdtSelector::new().expect("internal UDT err on creation");
-        selector.register(key, Ops::with_read());
-        let (mut event_loop, events) = SelectorEventLoop::new(selector);
-
-        let _handle = thread::spawn(move || {
-            println!("spawning event loop.run");
-            event_loop.run();
-        });
-        events
-            .for_each(|ev| {
-                println!("received ev: {:?}", ev);
-                Ok(())
-            }).wait()
-            .unwrap();
-    }
 }

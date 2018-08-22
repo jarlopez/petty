@@ -1,11 +1,11 @@
 use channel;
-use std::collections::HashSet;
+use channel::RWEvent;
+use ops::Ops;
+use std::fmt::Debug;
 use std::hash::Hash;
-use std::io::Read;
-use Ops;
 
-pub trait SelectorKey: Eq + Hash {
-    type Io: channel::Read + channel::Write;
+pub trait SelectorKey: Eq + Hash + Debug + Sized {
+    type Io: channel::Read<Self> + channel::Write;
     type Resource: Hash + Eq;
 
     fn ready_ops(&self) -> Ops;
@@ -20,8 +20,7 @@ pub trait Selector<K: SelectorKey> {
 
     fn register(&mut self, key: K, interest: Ops);
     fn select(&mut self, timeout: i64);
-    fn selected_keys(&self) -> &HashSet<K::Resource>;
-    fn on_selected<F>(&mut self, f: F)
+    fn on_selected<F>(&mut self, coll: &mut Vec<RWEvent<K>>, f: F)
     where
-        F: Fn(&mut K) -> ();
+        F: Fn(&mut Vec<RWEvent<K>>, &mut K) -> ();
 }

@@ -1,80 +1,65 @@
+use bytes::BytesMut;
 use channel;
-use ev_loop::SelectorEventLoop;
+use channel::RWEvent;
+use channel::ReadEvent;
+use ops::Ops;
 use selector::Selector;
 use selector::SelectorKey;
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::hash::Hasher;
-use std::io;
+use std::io::Error;
 use std::io::Read;
-use std::rc::Rc;
-use udt;
-use udt::UdtError;
-use udt::UdtSocket;
-use udt::UdtStatus;
-use udt::{Epoll, EpollEvents};
-use Ops;
+use std::io::Write;
+use std::mem;
+use udt::UdtOpts;
+use udt::{self, Epoll, EpollEvents, UdtError, UdtSocket, UdtStatus};
 
-#[derive(Copy, Clone, Eq, PartialEq, Hash)]
+const DEFAULT_UDT_BUF_CAPACITY: usize = 10000;
+
+#[derive(Debug, Eq, PartialEq)]
 pub enum ChannelKind {
     Acceptor,
     Connector,
 }
 
-// TODO question: how to wrap UdtSelectorKey? 'registered' "owns" the keys, but 'selected' can point to them
+#[derive(Debug, Eq, PartialEq)]
+pub enum ChannelState {
+    Idle,
+    Connected,
+    Connecting,
+}
+
+#[derive(Debug)]
 pub struct UdtSelector {
     poller: Epoll,
     selected: HashSet<UdtSocket>,
-    registered: HashMap<UdtSocket, UdtSelectorKey>,
+    registered: HashMap<UdtSocket, UdtKey>,
 }
 
-#[derive(Eq, PartialEq)]
-pub struct UdtSelectorKey {
-    channel: UdtChannel,
+#[derive(Debug, Eq)]
+pub struct UdtKey {
+    ch: UdtChannel,
     readiness: Ops,
     interest: Ops,
 }
 
-#[derive(Eq)]
-pub struct UdtSocketIo {
+#[derive(Debug, Eq)]
+pub struct UdtChannel {
+    io: SocketIo,
+    kind: ChannelKind,
+    state: ChannelState,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct SocketIo {
     socket: UdtSocket,
 }
 
-impl UdtSocketIo {
-    pub fn new(socket: UdtSocket) -> Self {
-        UdtSocketIo { socket }
-    }
-}
-impl Read for UdtSocketIo {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, io::Error> {
-        let len = buf.len();
-        let nbytes = self
-            .socket
-            .recv(buf, len)
-            .map_err(|udt_err| {
-                // TODO
-                println!("err!!! {:?}", udt_err);
-            }).expect("internal UDT err");
-        Ok(nbytes as usize)
-    }
-}
-
-impl Hash for UdtSocketIo {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.socket.hash(state)
-    }
-}
-
-impl PartialEq for UdtSocketIo {
-    fn eq(&self, other: &UdtSocketIo) -> bool {
-        self.socket == other.socket
-    }
-}
-
+// impl UdtSelector
 impl UdtSelector {
     pub fn new() -> Result<Self, UdtError> {
+        udt::init();
         let poller = Epoll::create()?;
         let selector = UdtSelector {
             poller,
@@ -85,36 +70,101 @@ impl UdtSelector {
     }
 }
 
-impl UdtSelectorKey {
-    pub fn new(channel: UdtChannel) -> Self {
-        ///  TODO poopulate interest based on channel kind
-        let interest = match channel.kind {
-            ChannelKind::Acceptor => Ops::with_accept(),
-            ChannelKind::Connector => Ops::with_connect(),
-        };
+impl Selector<UdtKey> for UdtSelector {
+    const DEFAULT_TIMEOUT_MS: i64 = 50;
 
-        UdtSelectorKey {
-            channel,
-            readiness: Ops::empty(),
+    fn register(&mut self, mut key: UdtKey, interest: Ops) {
+        key.interest = interest;
+        println!("[UdtSelector] registering key");
+        let mut events = EpollEvents::empty();
+        if interest.has_read() {
+            events |= udt::UDT_EPOLL_IN;
+        }
+        if interest.has_write() {
+            events |= udt::UDT_EPOLL_OUT;
+        }
+        if interest.has_error() {
+            events |= udt::UDT_EPOLL_ERR;
+        }
+
+        key.ch
+            .io
+            .socket
+            .setsockopt(UdtOpts::UDT_SNDSYN, false)
+            .unwrap();
+
+        self.poller
+            .add_usock(&key.socket_clone(), Some(events))
+            .expect("add_usock err");
+        self.registered.insert(key.socket_clone(), key);
+    }
+
+    fn select(&mut self, timeout: i64) {
+        // TODO modify poller to re-use fixed length vectors
+        let (readers, _writers) = self.poller.wait(timeout as i64, true).unwrap();
+
+        for socket in readers {
+            let mut key = {
+                match self.registered.get_mut(&socket) {
+                    None => {
+                        println!("[WARN] unregistered read for {:?}", socket);
+                        continue;
+                    }
+                    Some(key) => key,
+                }
+            };
+            if key.apply_read() {
+                self.selected.insert(socket);
+            } else {
+                println!("Reader {:?} didn't wanna read", socket);
+            }
+        }
+        // TODO process writers
+    }
+
+    fn on_selected<F>(&mut self, coll: &mut Vec<RWEvent<UdtKey>>, f: F)
+    where
+        F: Fn(&mut Vec<RWEvent<UdtKey>>, &mut UdtKey) -> (),
+    {
+        let mut selected = mem::replace(&mut self.selected, HashSet::new());
+        selected.drain().for_each(|r| {
+            if let Some(key) = self.registered.get_mut(&r) {
+                f(coll, key);
+            } else {
+                println!("not found!");
+            }
+        });
+    }
+}
+
+// impl Key
+impl UdtKey {
+    pub fn new(ch: UdtChannel) -> Self {
+        let mut interest = Ops::empty();
+        let readiness = Ops::empty();
+
+        match ch.kind {
+            ChannelKind::Acceptor => {
+                interest.apply(Ops::ACCEPT);
+            }
+            ChannelKind::Connector => {
+                interest.apply(Ops::CONNECT);
+            }
+        }
+
+        UdtKey {
+            ch,
+            readiness,
             interest,
         }
     }
 
-    pub fn with_state(channel: UdtChannel, state: Ops) -> Self {
-        UdtSelectorKey {
-            channel,
-            readiness: state,
-            interest: Ops::empty(),
-        }
-    }
-}
-impl Hash for UdtSelectorKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.channel.io.socket.hash(state)
+    pub fn socket_clone(&self) -> UdtSocket {
+        self.ch.io.socket.clone()
     }
 }
 
-impl SelectorKey for UdtSelectorKey {
+impl SelectorKey for UdtKey {
     type Io = UdtChannel;
     type Resource = UdtSocket;
 
@@ -123,11 +173,11 @@ impl SelectorKey for UdtSelectorKey {
     }
 
     fn io(&mut self) -> &mut Self::Io {
-        &mut self.channel
+        &mut self.ch
     }
 
     fn apply_read(&mut self) -> bool {
-        match self.channel.kind {
+        match self.ch.kind {
             ChannelKind::Acceptor => {
                 if self.interest.has_accept() {
                     self.readiness.apply(Ops::ACCEPT);
@@ -147,12 +197,12 @@ impl SelectorKey for UdtSelectorKey {
     }
 
     fn apply_write(&mut self) -> bool {
-        match self.channel.kind {
+        match self.ch.kind {
             ChannelKind::Acceptor => {
                 return false;
             }
             ChannelKind::Connector => {
-                if self.channel.io.socket.getstate() == UdtStatus::CONNECTED {
+                if self.ch.io.socket.getstate() == UdtStatus::CONNECTED {
                     // Connected; transition to writable
                     if self.interest.has_write() {
                         self.readiness.apply(Ops::WRITE);
@@ -171,124 +221,26 @@ impl SelectorKey for UdtSelectorKey {
     }
 }
 
-impl Selector<UdtSelectorKey> for UdtSelector {
-    const DEFAULT_TIMEOUT_MS: i64 = 1000;
-
-    fn register(&mut self, key: UdtSelectorKey, interest: Ops) {
-        println!("[UdtSelector] registering key");
-        let mut events = EpollEvents::empty();
-        if interest.has_read() {
-            events |= udt::UDT_EPOLL_IN;
-        }
-        if interest.has_write() {
-            events |= udt::UDT_EPOLL_OUT;
-        }
-        if interest.has_error() {
-            events |= udt::UDT_EPOLL_ERR;
-        }
-
-        self.poller
-            .add_usock(&key.channel.io.socket, Some(events))
-            .expect("add_usock err");
-        self.registered.insert(key.channel.io.socket, key);
-    }
-
-    fn select(&mut self, timeout: i64) {
-        println!("[UdtSelector] selecting with timeout {:?}", timeout);
-        let (readers, writers) = self.poller.wait(timeout as i64, true).unwrap();
-        println!("numreaders: {:?}", readers.len());
-
-        // TODO process readers, make sure they want to be added to 'selected' based on entries in 'registered'
-        // process readers
-        for socket in readers {
-            let key = {
-                match self.registered.get_mut(&socket) {
-                    None => {
-                        println!("[WARN] unregistered read for {:?}", socket);
-                        continue;
-                    }
-                    Some(key) => key,
-                }
-            };
-            if key.apply_read() {
-                // Ready to be processed as a newly selected key
-                println!("Reader {:?} ready and selected", socket);
-                self.selected.insert(socket);
-            } else {
-                println!("Reader {:?} didn't wanna read", socket);
-            }
-        }
-        // process writers
-    }
-
-    fn selected_keys(&self) -> &HashSet<UdtSocket> {
-        &self.selected
-    }
-
-    fn on_selected<F>(&mut self, f: F)
-    where
-        F: Fn(&mut UdtSelectorKey) -> (),
-    {
-        for resource in self.selected.drain() {
-            self.registered.get_mut(&resource).map(&f);
-        }
+impl Hash for UdtKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.ch.io.socket.hash(state)
     }
 }
 
-#[derive(Eq)]
-pub struct UdtChannel {
-    io: UdtSocketIo,
-    kind: ChannelKind,
+impl PartialEq for UdtKey {
+    fn eq(&self, other: &UdtKey) -> bool {
+        self.ch.io.socket == other.ch.io.socket
+    }
 }
 
+// impl UdtChannel
 impl UdtChannel {
     pub fn new(socket: UdtSocket, kind: ChannelKind) -> Self {
+        let io = SocketIo::new(socket);
         UdtChannel {
-            io: UdtSocketIo::new(socket),
+            io,
             kind,
-        }
-    }
-}
-
-impl channel::Read for UdtChannel {
-    fn read(&mut self) {
-        match self.kind {
-            ChannelKind::Acceptor => {
-                println!("Accepting new channel");
-                let peer = self
-                    .io
-                    .socket
-                    .accept()
-                    .expect("told to accept but experienced err!");
-                // TODO register the new channel with our epoll selector
-            }
-            ChannelKind::Connector => {
-                println!("TODO implement Connectors channel::Read");
-            }
-        }
-    }
-}
-
-impl channel::Write for UdtChannel {
-    fn write(&mut self) {
-        match self.kind {
-            ChannelKind::Acceptor => {
-                unimplemented!();
-            }
-            ChannelKind::Connector => {
-                unimplemented!();
-            }
-        }
-    }
-
-    fn flush(&mut self) {
-        match self.kind {
-            ChannelKind::Acceptor => {
-                unimplemented!();
-            }
-            ChannelKind::Connector => {
-                unimplemented!();
-            }
+            state: ChannelState::Idle,
         }
     }
 }
@@ -299,8 +251,72 @@ impl PartialEq for UdtChannel {
     }
 }
 
-impl Hash for UdtChannel {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.io.socket.hash(state)
+impl channel::Read<UdtKey> for UdtChannel {
+    fn read(&mut self, collector: &mut Vec<RWEvent<UdtKey>>) {
+        match self.kind {
+            ChannelKind::Acceptor => {
+                let (peer, addr) = self
+                    .io
+                    .socket
+                    .accept()
+                    .expect("told to accept but experienced err!");
+                let ch = UdtChannel::new(peer, ChannelKind::Connector);
+                let key = UdtKey::new(ch);
+                let ev = ReadEvent::NewPeer(key, addr);
+                // TODO figure out Netty-like pipeline for funneling read events
+                collector.push(RWEvent::Read(ev));
+            }
+            ChannelKind::Connector => {
+                // TODO buffer allocator
+                let mut buf = {
+                    let mut buf = BytesMut::with_capacity(DEFAULT_UDT_BUF_CAPACITY);
+                    buf.resize(DEFAULT_UDT_BUF_CAPACITY, 0u8);
+                    buf
+                };
+
+                if let Ok(len) = self.io.read(&mut buf) {
+                    buf.truncate(len);
+                    let ev = ReadEvent::Data(buf.freeze());
+                    // TODO figure out Netty-like pipeline for funneling read events
+                    collector.push(RWEvent::Read(ev));
+                }
+            }
+        }
+    }
+}
+
+impl channel::Write for UdtChannel {
+    fn write(&mut self) {
+        unimplemented!()
+    }
+
+    fn flush(&mut self) {
+        unimplemented!()
+    }
+}
+
+// impl SocketIo
+impl SocketIo {
+    pub fn new(socket: UdtSocket) -> Self {
+        SocketIo { socket }
+    }
+}
+
+impl Read for SocketIo {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
+        let len = buf.len();
+        let len = self.socket.recv(buf, len).expect("TODO UDT error on recv");
+        Ok(len as usize)
+    }
+}
+
+impl Write for SocketIo {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Error> {
+        let len = self.socket.send(buf).expect("TODO udt error on send");
+        Ok(len as usize)
+    }
+
+    fn flush(&mut self) -> Result<(), Error> {
+        Ok(())
     }
 }
