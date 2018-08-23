@@ -17,6 +17,10 @@ path = "src/lib.rs"
 name = "server"
 path = "src/bin/server.rs"
 
+[[bin]]
+name = "client"
+path = "src/bin/client.rs"
+
 [dependencies]
 bytes = "0.4"
 futures = "0.1.23"
