@@ -15,7 +15,7 @@ where
     // Outgoing events from this event loop
     events: mpsc::UnboundedSender<Trigger>,
     key: PhantomData<K>,
-    read_buf: Vec<RWEvent<K>>,
+    events_buf: Vec<RWEvent<K>>,
 }
 
 impl<S, K> SelectorEventLoop<S, K>
@@ -30,7 +30,7 @@ where
             selector,
             events: tx,
             key: PhantomData,
-            read_buf: Vec::new(),
+            events_buf: Vec::new(),
         };
         (event_loop, rx)
     }
@@ -48,24 +48,34 @@ where
     }
 
     fn process_selected(&mut self) {
-        use channel::Read;
+        use channel::{Read, Write};
 
         self.selector
-            .on_selected(&mut self.read_buf, |ev, key: &mut K| {
+            .on_selected(&mut self.events_buf, |ev, key: &mut K| {
                 let ready_ops = key.ready_ops();
+                let io = key.io();
+
                 if ready_ops.has_read() || ready_ops.has_accept() {
-                    let io = key.io();
                     io.read(ev);
                 }
+
+                if ready_ops.has_write() {
+                    io.flush(ev);
+                }
             });
-        for ev in self.read_buf.drain(..) {
+        // TODO the event loop shouldn't really be driving this logic
+        // TODO but instead something like Netty's Unsafe abstractions
+        for ev in self.events_buf.drain(..) {
             match ev {
-                RWEvent::Read(ReadEvent::NewPeer(key, _addr)) => {
+                RWEvent::Read(ReadEvent::NewPeer(key, addr)) => {
                     let mut ops = Ops::empty();
                     ops.apply(Ops::READ);
                     ops.apply(Ops::WRITE);
                     ops.apply(Ops::ERROR);
                     self.selector.register(key, ops);
+                    self.events
+                        .unbounded_send(Trigger::State(events::StateEvent::Connected(addr)))
+                        .expect("Dropped unbounded events receiver");
                 }
                 RWEvent::Read(ReadEvent::Data(bytes)) => {
                     self.events
@@ -84,12 +94,20 @@ where
 
 #[derive(Debug)]
 pub enum Trigger {
+    State(events::StateEvent),
     Read(events::ReadEvent),
     Write(events::WriteEvent),
     Error(events::ErrorEvent),
 }
 mod events {
     use bytes::Bytes;
+    use std::net::SocketAddr;
+
+    #[derive(Debug)]
+    pub enum StateEvent {
+        Connected(SocketAddr),
+        Disconnected(SocketAddr),
+    }
 
     #[derive(Debug)]
     pub enum ReadEvent {

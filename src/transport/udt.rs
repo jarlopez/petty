@@ -290,12 +290,12 @@ impl channel::Read<UdtKey> for UdtChannel {
     }
 }
 
-impl channel::Write for UdtChannel {
-    fn write(&mut self) {
+impl channel::Write<UdtKey> for UdtChannel {
+    fn write(&mut self, collector: &mut Vec<RWEvent<UdtKey>>) {
         unimplemented!()
     }
 
-    fn flush(&mut self) {
+    fn flush(&mut self, collector: &mut Vec<RWEvent<UdtKey>>) {
         unimplemented!()
     }
 }

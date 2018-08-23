@@ -64,6 +64,9 @@ fn server() {
                 Trigger::Error(_) => {
                     println!("received ERROR event");
                 }
+                Trigger::State(state) => {
+                    println!("received STATE event {:?}", state);
+                }
             }
             Ok(())
         }).wait()

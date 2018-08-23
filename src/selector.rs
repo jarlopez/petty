@@ -5,7 +5,7 @@ use std::fmt::Debug;
 use std::hash::Hash;
 
 pub trait SelectorKey: Eq + Hash + Debug + Sized {
-    type Io: channel::Read<Self> + channel::Write;
+    type Io: channel::Read<Self> + channel::Write<Self>;
     type Resource: Hash + Eq;
 
     fn ready_ops(&self) -> Ops;

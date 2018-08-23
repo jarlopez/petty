@@ -7,9 +7,9 @@ pub trait Read<K: SelectorKey> {
     fn read(&mut self, collector: &mut Vec<RWEvent<K>>);
 }
 
-pub trait Write {
-    fn write(&mut self);
-    fn flush(&mut self);
+pub trait Write<K: SelectorKey> {
+    fn write(&mut self, collector: &mut Vec<RWEvent<K>>);
+    fn flush(&mut self, collector: &mut Vec<RWEvent<K>>);
 }
 
 #[derive(Debug)]
