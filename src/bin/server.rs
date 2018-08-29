@@ -17,18 +17,16 @@ fn server() {
     use petty::transport::udt::UdtSelector;
     use udt::UdtSocket;
 
-    use futures;
-    use futures::Future;
-    use futures::Stream;
+    use std::sync::mpsc;
     use std::thread;
 
-    let (tx, rx) = futures::oneshot();
+    let (tx, rx) = mpsc::channel();
 
     let _handle = thread::spawn(move || {
         let selector = UdtSelector::new().expect("internal UDT err on creation");
-        let (mut event_loop, events) = SelectorEventLoop::new(selector);
+        let (mut event_loop, tasks, events) = SelectorEventLoop::new(selector);
 
-        tx.send(events)
+        tx.send((events, tasks))
             .expect("Unable to return events receiver to listener.");
         println!("spawning event loop.run");
 
@@ -44,33 +42,28 @@ fn server() {
         let ch = UdtChannel::new(sock, ChannelKind::Acceptor);
         let key = UdtKey::new(ch);
 
-        let mut ops = Ops::empty();
-        ops.apply(Ops::READ);
-        ops.apply(Ops::ACCEPT);
+        let ops = Ops::with_accept();
         event_loop.register(key, ops);
         event_loop.run();
     });
-    let events = rx.wait().unwrap();
-    events
-        .for_each(|ev: Trigger| {
-            // Process event outside of event loop
-            match ev {
-                Trigger::Read(_) => {
-                    println!("received READ event");
-                }
-                Trigger::Write(_) => {
-                    println!("received WRITE event");
-                }
-                Trigger::Error(_) => {
-                    println!("received ERROR event");
-                }
-                Trigger::State(state) => {
-                    println!("received STATE event {:?}", state);
-                }
+    let (events, _tasks) = rx.recv().unwrap();
+    loop {
+        let ev: Trigger<UdtKey> = events.recv().unwrap();
+        match ev {
+            Trigger::Read(data) => {
+                //                println!("received READ event: {:?}", data);
             }
-            Ok(())
-        }).wait()
-        .unwrap();
+            Trigger::Write(_) => {
+                println!("received WRITE event");
+            }
+            Trigger::Error(_) => {
+                println!("received ERROR event");
+            }
+            Trigger::State(state) => {
+                println!("received STATE event {:?}", state);
+            }
+        }
+    }
 }
 
 fn main() {

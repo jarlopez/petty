@@ -1,37 +1,43 @@
 use bytes::Bytes;
+use ops::Ops;
+use selector::Selector;
 use selector::SelectorKey;
 use std::net::SocketAddr;
 
-pub trait Read<K: SelectorKey> {
-    //    type KeyType: SelectorKey;
+// TODO should really be implemented for whatever's inside SelectorKey's Resource
+pub trait ChRead<K: SelectorKey> {
     fn read(&mut self, collector: &mut Vec<RWEvent<K>>);
 }
 
-pub trait Write<K: SelectorKey> {
-    fn write(&mut self, collector: &mut Vec<RWEvent<K>>);
+pub trait ChWrite<K: SelectorKey> {
+    fn write(&mut self, data: &Bytes, collector: &mut Vec<RWEvent<K>>);
     fn flush(&mut self, collector: &mut Vec<RWEvent<K>>);
+}
+
+pub trait ChExt<K: SelectorKey> {
+    fn finish_connect(&mut self, collector: &mut Vec<RWEvent<K>>);
 }
 
 #[derive(Debug)]
 pub enum RWEvent<K: SelectorKey> {
+    Registration(RegistrationEvent<K>),
     Read(ReadEvent<K>),
+    State(StateEvent<K>),
+    Error(/*TODO*/),
 }
 
 #[derive(Debug)]
 pub enum ReadEvent<K: SelectorKey> {
     NewPeer(K, SocketAddr),
-    Error(),
     Data(Bytes),
 }
 
 #[derive(Debug)]
-pub struct AcceptedPeer<K: SelectorKey> {
-    key: K,
-    peer: SocketAddr,
+pub enum RegistrationEvent<K: SelectorKey> {
+    Update(K::Resource, Ops),
 }
 
-impl<K: SelectorKey> AcceptedPeer<K> {
-    pub fn new(key: K, peer: SocketAddr) -> Self {
-        AcceptedPeer { key, peer }
-    }
+#[derive(Debug)]
+pub enum StateEvent<K: SelectorKey> {
+    ConnectedPeer(K::Resource, SocketAddr),
 }
