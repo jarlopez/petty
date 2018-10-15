@@ -1,6 +1,5 @@
 use bytes::Bytes;
 use ops::Ops;
-use selector::Selector;
 use selector::SelectorKey;
 use std::net::SocketAddr;
 

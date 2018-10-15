@@ -2,7 +2,7 @@ extern crate bytes;
 extern crate core;
 extern crate futures;
 extern crate libudt4_sys as udtsys;
-extern crate udt;
+pub extern crate udt;
 
 pub mod channel;
 pub mod ev_loop;

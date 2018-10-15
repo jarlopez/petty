@@ -3,6 +3,7 @@ use channel::RWEvent;
 use channel::ReadEvent;
 use channel::RegistrationEvent;
 use channel::StateEvent;
+use futures;
 use ops::Ops;
 use selector::Selector;
 use selector::SelectorKey;
@@ -16,16 +17,16 @@ where
     K: SelectorKey,
     S: Selector<K>,
 {
-    fn call_box(self: Box<Self>, sys: &mut S, events: mpsc::Sender<Trigger<K>>);
+    fn call_box(self: Box<Self>, sys: &mut S, events: futures::sync::mpsc::UnboundedSender<Trigger<K>>);
 }
 
 impl<S, K, F> FnBox<S, K> for F
 where
-    F: FnOnce(&mut S, mpsc::Sender<Trigger<K>>),
+    F: FnOnce(&mut S, futures::sync::mpsc::UnboundedSender<Trigger<K>>),
     K: SelectorKey,
     S: Selector<K>,
 {
-    fn call_box(self: Box<F>, sys: &mut S, events: mpsc::Sender<Trigger<K>>) {
+    fn call_box(self: Box<F>, sys: &mut S, events: futures::sync::mpsc::UnboundedSender<Trigger<K>>) {
         (*self)(sys, events);
     }
 }
@@ -39,7 +40,7 @@ where
 {
     selector: S,
     // Outgoing events from this event loop
-    events: mpsc::Sender<Trigger<K>>,
+    events: futures::sync::mpsc::UnboundedSender<Trigger<K>>,
     io_tasks: mpsc::Receiver<Work<'static, S, K>>,
     key: PhantomData<K>,
     events_buf: Vec<RWEvent<K>>,
@@ -55,9 +56,9 @@ where
     ) -> (
         Self,
         mpsc::Sender<Work<'static, S, K>>,
-        mpsc::Receiver<Trigger<K>>,
+        futures::sync::mpsc::UnboundedReceiver<Trigger<K>>,
     ) {
-        let (ev_tx, ev_rx) = mpsc::channel();
+        let (ev_tx, ev_rx) = futures::sync::mpsc::unbounded();
         let (io_tx, io_rx) = mpsc::channel();
 
         let event_loop = SelectorEventLoop {
@@ -123,13 +124,13 @@ where
                     let resource = key.resource();
                     self.selector.register(key, ops);
                     self.events
-                        .send(Trigger::State(events::StateEvent::Connected(
+                        .unbounded_send(Trigger::State(events::StateEvent::Connected(
                             resource, addr,
                         ))).expect("Dropped unbounded events receiver");
                 }
                 RWEvent::Read(ReadEvent::Data(bytes)) => {
                     self.events
-                        .send(Trigger::Read(events::ReadEvent::Data(bytes)))
+                        .unbounded_send(Trigger::Read(events::ReadEvent::Data(bytes)))
                         .expect("Dropped unbounded events receiver");
                 }
                 RWEvent::Registration(RegistrationEvent::Update(resource, ops)) => {
@@ -138,7 +139,7 @@ where
                 }
                 RWEvent::State(StateEvent::ConnectedPeer(resource, addr)) => {
                     self.events
-                        .send(Trigger::State(events::StateEvent::Connected(
+                        .unbounded_send(Trigger::State(events::StateEvent::Connected(
                             resource, addr,
                         ))).expect("Dropped unbounded events receiver");
                 }

@@ -100,7 +100,7 @@ impl Selector<UdtKey> for UdtSelector {
     }
 
     fn update_registration(&mut self, key: UdtSocket, interest: Ops) {
-        if let Some(k) = self.registered.get_mut(&key) {
+        if let Some(_k) = self.registered.get_mut(&key) {
             let mut events = EpollEvents::empty();
             if interest.has_read() || interest.has_accept() {
                 events |= udt::UDT_EPOLL_IN;
